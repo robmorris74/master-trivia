@@ -61,7 +61,7 @@ button,input,select{font:inherit}button{cursor:pointer}
 <section id="home" class="card hero">
 <h1>Choose your challenge.</h1><p>Solo, teams, live wagers, family mode, daily challenges and championship play — all from one game.</p>
 <div class="profile"><div id="avatar" class="avatar">P</div><div><input id="playerName" class="input" maxlength="18" placeholder="Enter your name"><div style="font-size:12px;color:var(--muted);margin-top:6px">Saved for stats, leaderboards and multiplayer.</div></div></div>
-<div id="soundBar" class="soundbar"><div style="flex:1"><b>Game audio</b><div style="font-size:12px;color:#aeb9ce">Music, cheers, boos and varied reactions.</div></div><button id="enableSoundBtn" class="primary">Enable</button></div>
+<div id="soundBar" class="soundbar"><div style="flex:1"><b>Game audio</b><div style="font-size:12px;color:#aeb9ce">Tap Enable once. You will immediately hear a sound test.</div></div><button id="enableSoundBtn" class="primary">Enable</button></div>
 <div class="dashboard"><div class="tile"><b id="statGames">0</b><span>Games</span></div><div class="tile"><b id="statWins">0</b><span>Wins</span></div><div class="tile"><b id="statBest">0</b><span>Best Score</span></div><div class="tile"><b id="statStreak">0</b><span>Best Streak</span></div><div class="tile"><b id="statAccuracy">0%</b><span>Accuracy</span></div></div>
 
 <div class="sectionTitle"><h3>Categories</h3><span style="font-size:12px;color:var(--muted)">Choose any mix</span></div><div id="categoryChips" class="chips"></div>
@@ -145,14 +145,137 @@ renderChips();
 function pool(){return selected.has("All")?[...QUESTIONS]:QUESTIONS.filter(q=>selected.has(q.category))}
 function balancedDeck(n,filterFn=null,r=Math.random){let p=pool();if(filterFn)p=p.filter(filterFn);const cats=Array.from(new Set(p.map(q=>q.category))),by={};cats.forEach(c=>by[c]=shuffle(p.filter(q=>q.category===c),r));const out=[];let i=0;while(out.length<n&&i<n*Math.max(1,cats.length)*6){const c=cats[i%cats.length];if(by[c]?.length)out.push(by[c].pop());i++}return out.slice(0,n)}
 
-/* audio */
-const AUDIO={menu:["https://assets.mixkit.co/music/preview/mixkit-game-level-music-689.mp3"],tension:["https://assets.mixkit.co/music/preview/mixkit-game-show-suspense-waiting-668.mp3"],correct:["https://assets.mixkit.co/sfx/preview/mixkit-correct-answer-tone-2870.mp3","https://assets.mixkit.co/sfx/preview/mixkit-correct-answer-reward-952.mp3","https://assets.mixkit.co/sfx/preview/mixkit-winning-chimes-2015.mp3"],wrong:["https://assets.mixkit.co/sfx/preview/mixkit-game-show-wrong-answer-buzz-950.mp3","https://assets.mixkit.co/sfx/preview/mixkit-wrong-answer-fail-notification-946.mp3"],cheer:["https://assets.mixkit.co/sfx/preview/mixkit-small-group-cheer-and-applause-518.mp3"],reveal:["https://assets.mixkit.co/sfx/preview/mixkit-short-fast-woosh-1669.mp3"],click:["https://assets.mixkit.co/sfx/preview/mixkit-arcade-game-jump-coin-216.wav"]};
-let sound=false,music=false,currentMusic=null;function rand(a){return a[Math.floor(Math.random()*a.length)]}function mk(url,v=.8,loop=false){const a=new Audio(url);a.volume=v;a.loop=loop;return a}
-async function enableAudio(){sound=true;music=true;$("soundFab").textContent="🔊";$("soundBar").innerHTML='<div style="flex:1"><b>Audio enabled</b><div style="font-size:12px;color:#aeb9ce">Music, cheers, boos and reactions are on.</div></div>';playMusic("menu");sfx("correct")}
-$("enableSoundBtn").onclick=enableAudio;$("soundFab").onclick=()=>{sound=!sound;$("soundFab").textContent=sound?"🔊":"🔇"}
-function sfx(k){if(!sound)return;const map=k==="win"?"correct":k;if(!AUDIO[map])return;mk(rand(AUDIO[map]),k==="cheer"?.9:.75).play().catch(()=>{});if(k==="correct"&&Math.random()<.65)setTimeout(()=>mk(rand(AUDIO.cheer),.55).play().catch(()=>{}),120);if(k==="wrong"&&Math.random()<.45)setTimeout(()=>mk(rand(AUDIO.wrong),.45).play().catch(()=>{}),160)}
-function playMusic(k){if(!music)return;if(currentMusic){currentMusic.pause();currentMusic=null}currentMusic=mk(AUDIO[k][0],k==="tension"?.16:.19,true);currentMusic.play().catch(()=>{})}
-function stopMusic(){if(currentMusic){currentMusic.pause();currentMusic=null}}
+/* audio — reliable self-contained engine with optional real crowd recordings */
+const REAL_CROWD=[
+  "https://commons.wikimedia.org/wiki/Special:Redirect/file/Applause_i.ogg",
+  "https://commons.wikimedia.org/wiki/Special:Redirect/file/Applause_ii.ogg",
+  "https://commons.wikimedia.org/wiki/Special:Redirect/file/Ohhh_ahhh.ogg"
+];
+let sound=false,music=false,audioCtx=null,musicTimer=null,musicStep=0,lastCrowd=null;
+
+function getAC(){
+  try{
+    if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==="suspended") audioCtx.resume();
+    return audioCtx;
+  }catch(e){return null}
+}
+function osc(freq,dur=.12,type="sine",gain=.04,delay=0){
+  const a=getAC();if(!a)return;
+  const o=a.createOscillator(),g=a.createGain(),now=a.currentTime+delay;
+  o.type=type;o.frequency.setValueAtTime(freq,now);
+  g.gain.setValueAtTime(Math.max(.0001,gain),now);
+  g.gain.exponentialRampToValueAtTime(.0001,now+dur);
+  o.connect(g);g.connect(a.destination);o.start(now);o.stop(now+dur+.03)
+}
+function noise(dur=.15,gain=.025,delay=0,low=700,high=5000){
+  const a=getAC();if(!a)return;
+  const n=Math.floor(a.sampleRate*dur),buf=a.createBuffer(1,n,a.sampleRate),data=buf.getChannelData(0);
+  for(let i=0;i<n;i++)data[i]=(Math.random()*2-1)*(1-i/n);
+  const s=a.createBufferSource(),f=a.createBiquadFilter(),g=a.createGain(),now=a.currentTime+delay;
+  f.type="bandpass";f.frequency.value=(low+high)/2;f.Q.value=.65;
+  g.gain.setValueAtTime(gain,now);g.gain.exponentialRampToValueAtTime(.0001,now+dur);
+  s.buffer=buf;s.connect(f);f.connect(g);g.connect(a.destination);s.start(now)
+}
+function say(text,rate=1.05,pitch=1){
+  if(!sound||!("speechSynthesis" in window))return;
+  try{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text);u.rate=rate;u.pitch=pitch;u.volume=.72;
+    speechSynthesis.speak(u)
+  }catch(e){}
+}
+function tapSound(){osc(760,.045,"sine",.018);osc(1220,.035,"sine",.010,.01)}
+function revealSound(){noise(.18,.025,0,900,5200);osc(280,.16,"triangle",.022);osc(760,.18,"triangle",.018,.055)}
+function correctSound(){
+  [[659,0],[830,.045],[1047,.09],[1319,.14]].forEach(([f,d],i)=>osc(f,.22,"sine",.026-i*.003,d));
+  noise(.10,.018,.02,1800,6500)
+}
+function wrongSound(){
+  osc(190,.16,"sawtooth",.025);osc(130,.20,"sawtooth",.022,.07);osc(78,.26,"sine",.025,.05)
+}
+function streakSound(){[784,988,1175,1568,1976].forEach((f,i)=>osc(f,.20,"triangle",.020,i*.055))}
+function countSound(){osc(1050,.05,"square",.012)}
+function winSound(){
+  [523,659,784,1047,1319].forEach((f,i)=>osc(f,.34,"triangle",.026,i*.10));
+  for(let i=0;i<7;i++)noise(.28,.020,i*.055,900,6000)
+}
+function synthCheer(){
+  for(let i=0;i<13;i++)noise(.42+Math.random()*.25,.020+Math.random()*.014,i*.035,500,4200);
+  [880,1100,1320,990].forEach((f,i)=>osc(f,.28,"sine",.012,.08+i*.11))
+}
+function synthBoo(){
+  [118,135,102,150].forEach((f,i)=>osc(f,.55,"sawtooth",.012,i*.07));
+  for(let i=0;i<5;i++)noise(.38,.012,i*.05,120,700)
+}
+function playRealCrowd(){
+  if(!sound)return;
+  try{
+    const a=new Audio(REAL_CROWD[Math.floor(Math.random()*REAL_CROWD.length)]);
+    a.volume=.42;a.play().catch(()=>synthCheer());lastCrowd=a
+  }catch(e){synthCheer()}
+}
+function startMusic(){
+  if(!music)return;stopMusic();musicStep=0;
+  const seq=[110,146.83,164.81,146.83,130.81,164.81,196,164.81];
+  musicTimer=setInterval(()=>{
+    if(!music)return;
+    const root=seq[musicStep%seq.length];
+    // bass pulse
+    osc(root,.38,"sine",.010);
+    // airy chord
+    osc(root*2,.42,"triangle",.004);
+    osc(root*2.5,.42,"triangle",.0035);
+    osc(root*3,.42,"triangle",.003);
+    // kick / hat feel
+    if(musicStep%2===0){osc(62,.08,"sine",.020);noise(.035,.006,0,3500,8000)}
+    else noise(.055,.008,0,2200,7200);
+    musicStep++
+  },360)
+}
+function stopMusic(){if(musicTimer){clearInterval(musicTimer);musicTimer=null}}
+async function enableAudio(){
+  sound=true;music=true;
+  const a=getAC();
+  try{if(a&&a.state==="suspended")await a.resume()}catch(e){}
+  $("soundFab").textContent="🔊";
+  $("soundBar").innerHTML='<div style="flex:1"><b>Audio is ON ✓</b><div style="font-size:12px;color:#aeb9ce">You should hear this test now. Music, cheers and varied reactions are enabled.</div></div><button id="testSoundBtn" class="secondary" style="width:auto">Test Sound</button>';
+  document.getElementById("testSoundBtn").onclick=()=>{correctSound();setTimeout(()=>{synthCheer();say("Game audio ready!",1.05,1.05)},120)};
+  correctSound();setTimeout(()=>{synthCheer();say("Game audio ready!",1.05,1.05)},120);startMusic()
+}
+$("enableSoundBtn").onclick=enableAudio;
+$("soundFab").onclick=()=>{
+  sound=!sound;
+  $("soundFab").textContent=sound?"🔊":"🔇";
+  if(sound){getAC();tapSound()}else{stopMusic();try{speechSynthesis.cancel()}catch(e){}}
+};
+function sfx(k){
+  if(!sound)return;
+  if(k==="tap"){tapSound();return}
+  if(k==="reveal"){revealSound();return}
+  if(k==="count"){countSound();return}
+  if(k==="streak"){streakSound();if(Math.random()<.55)say(["Hot streak!","Nice run!","Keep it going!"][Math.floor(Math.random()*3)],1.08,1.08);return}
+  if(k==="win"){winSound();setTimeout(()=>{playRealCrowd();say("Morris Master champion!",.98,1.08)},160);return}
+  if(k==="cheer"){playRealCrowd();return}
+  if(k==="correct"){
+    correctSound();
+    const lines=["Correct!","Nice!","You got it!","Great answer!","Yes!"];
+    if(Math.random()<.48)say(lines[Math.floor(Math.random()*lines.length)],1.08,1.06);
+    if(Math.random()<.72)setTimeout(()=>playRealCrowd(),120);
+    return
+  }
+  if(k==="wrong"){
+    wrongSound();
+    if(Math.random()<.58)setTimeout(()=>synthBoo(),90);
+    if(Math.random()<.34)say(["Not this time.","Ooh, tough one.","So close."][Math.floor(Math.random()*3)],1.0,.92);
+    return
+  }
+}
+function playMusic(k){
+  if(!music)return;
+  // One reliable music engine; question screens simply run it a touch faster via the normal event cadence.
+  startMusic()
+}
 function playQuestionSound(q){if(q.sound)sfx(q.sound)}
 
 /* FX */
@@ -218,5 +341,5 @@ function renderReveal(){clearInterval(mTimer);const r=roomData.round,x=roomData.
 async function renderMultiResults(){clearInterval(mTimer);stopMusic();const arr=everyone().sort((a,b)=>b[1].score-a[1].score);const won=pid&&arr[0]?.[0]===pid;if(won){stats.wins++;if(multiMode==="champ"){stats.championships++;unlock("champ")}saveStats();sfx("win");confetti(150);const me=arr[0][1];await hallRef.child(me.name.replace(/[.#$\[\]\/]/g,"_")).transaction(v=>({name:me.name,wins:(v?.wins||0)+1}))}stats.games++;saveStats();$("resultTitle").textContent=multiMode==="champ"?(won?`🏆 ${esc(profile.name)} IS THE MORRIS MASTER!`:"Championship Final"):(won?"You won!":"Final Standings");$("resultSummary").innerHTML="";$("finalBoard").innerHTML=arr.map(([id,p],i)=>`<div class="resultrow ${i===0?'winner':''}"><span>#${i+1} ${esc(p.name)}</span><b>${p.score}</b></div>`).join("");$("saveScoreArea").classList.add("hidden");$("resultOverlay").classList.remove("hidden");loadBoards()}
 async function leaveRoom(){clearInterval(mTimer);if(roomRef){try{roomRef.off();if(pid)await roomRef.child("players/"+pid).remove()}catch(e){}}roomRef=null;partyDisplay=false;playMusic("menu");show("home")}
 </script>
-<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("./sw.js").catch(()=>{})}</script></body>
+<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("./sw.js?v=audiofix2").catch(()=>{})}</script></body>
 </html>
